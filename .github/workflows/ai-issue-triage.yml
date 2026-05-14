@@ -48,43 +48,15 @@ jobs:
             const body = process.env.ISSUE_BODY || "";
             const lines = body.split(/\r?\n/);
 
-            const findings = requiredSections.map(section => {
-              const value = extractSection(section.labels);
-              return {
-                key: section.key,
-                present: isMeaningful(value),
-                value
-              };
-            });
-            
-            const byKey = Object.fromEntries(findings.map(f => [f.key, f.present]));
-            const environmentPresent = byKey.hardware || byKey.operating_system;
-            
-            const presentCount = [
-                byKey.description,
-                byKey.steps_to_reproduce,
-                byKey.expected_behavior,
-                byKey.version,
-                environmentPresent,
-                byKey.logs
-            ].filter(Boolean).length;
-            
-            const score = Math.round((presentCount / 6) * 100);
-            
-            const missing = [];
-            if (!byKey.description) missing.push('description');
-            if (!byKey.steps_to_reproduce) missing.push('steps_to_reproduce');
-            if (!byKey.expected_behavior) missing.push('expected_behavior');
-            if (!byKey.version) missing.push('version');
-            if (!environmentPresent) missing.push('environment');
-            if (!byKey.logs) missing.push('logs');
-            
-            const actionable =
-              byKey.description &&
-              byKey.steps_to_reproduce &&
-              byKey.expected_behavior &&
-              environmentPresent &&
-              byKey.version;
+            const requiredSections = [
+              { key: 'description', labels: ['description'] },
+              { key: 'steps_to_reproduce', labels: ['steps to reproduce'] },
+              { key: 'expected_behavior', labels: ['expected behavior'] },
+              { key: 'version', labels: ['geti version'] },
+              { key: 'hardware', labels: ['hardware'] },
+              { key: 'operating_system', labels: ['operating system'] },
+              { key: 'logs', labels: ['screenshots, video recordings or logs'] }
+            ];
 
             function extractSection(labelOptions) {
               const lower = lines.map(l => l.toLowerCase());
@@ -97,7 +69,9 @@ jobs:
                       const original = lines[j];
                       const candidate = original.trim();
                       const candidateLower = candidate.toLowerCase();
-                      const nextHeader = requiredSections.some(sec => sec.labels.some(lbl => candidateLower.includes(lbl)));
+                      const nextHeader = requiredSections.some(sec =>
+                        sec.labels.some(lbl => candidateLower.includes(lbl))
+                      );
                       if (nextHeader && candidate.length > 0) break;
                       collected.push(original);
                     }
@@ -109,31 +83,31 @@ jobs:
             }
 
             function normalize(text) {
-                return (text || '')
-                  .replace(/[_*`>#-]/g, ' ')
-                  .replace(/\s+/g, ' ')
-                  .trim()
-                  .toLowerCase();
+              return (text || '')
+                .replace(/[_*`>#-]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
             }
-              
+
             function isMeaningful(text) {
-                const cleaned = normalize(text);
-                if (!cleaned) return false;
-                if (cleaned.length < 12) return false;
-              
-                const placeholders = [
-                  'n/a',
-                  'na',
-                  'none',
-                  'tbd',
-                  'todo',
-                  'no response',
-                  'short description',
-                  'software',
-                  'summary'
-                ];
-              
-                return !placeholders.includes(cleaned);
+              const cleaned = normalize(text);
+              if (!cleaned) return false;
+              if (cleaned.length < 12) return false;
+
+              const placeholders = [
+                'n/a',
+                'na',
+                'none',
+                'tbd',
+                'todo',
+                'no response',
+                'short description',
+                'software',
+                'summary'
+              ];
+
+              return !placeholders.includes(cleaned);
             }
 
             const findings = requiredSections.map(section => {
@@ -145,15 +119,35 @@ jobs:
               };
             });
 
-            const presentCount = findings.filter(f => f.present).length;
-            const score = Math.round((presentCount / requiredSections.length) * 100);
-            const missing = findings.filter(f => !f.present).map(f => f.key);
             const byKey = Object.fromEntries(findings.map(f => [f.key, f.present]));
+            const environmentPresent = byKey.hardware || byKey.operating_system;
+
+            const presentCount = [
+              byKey.description,
+              byKey.steps_to_reproduce,
+              byKey.expected_behavior,
+              byKey.version,
+              environmentPresent,
+              byKey.logs
+            ].filter(Boolean).length;
+
+            const score = Math.round((presentCount / 6) * 100);
+
+            const missing = [];
+            if (!byKey.description) missing.push('description');
+            if (!byKey.steps_to_reproduce) missing.push('steps_to_reproduce');
+            if (!byKey.expected_behavior) missing.push('expected_behavior');
+            if (!byKey.version) missing.push('version');
+            if (!environmentPresent) missing.push('environment');
+            if (!byKey.logs) missing.push('logs');
+
             const actionable =
               byKey.description &&
               byKey.steps_to_reproduce &&
               byKey.expected_behavior &&
-              (byKey.environment || byKey.logs);
+              environmentPresent &&
+              byKey.version;
+
             const severity = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high';
 
             const fallbackSummary = actionable
@@ -246,7 +240,7 @@ jobs:
               body: `${{ steps.comment.outputs.body }}`
             });
 
-      - name: Apply labels
+      - name: Replace triage and severity labels
         uses: actions/github-script@v7
         env:
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
@@ -255,7 +249,38 @@ jobs:
           script: |
             const actionable = process.env.ACTIONABLE === 'true';
             const severity = process.env.SEVERITY;
-            const labels = actionable
+
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }}
+            });
+
+            const existingLabels = issue.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+
+            const labelsToRemove = existingLabels.filter(name =>
+              name === 'needs-info' ||
+              name === 'triage/incomplete' ||
+              name === 'triage/complete' ||
+              name.startsWith('severity/')
+            );
+
+            for (const name of labelsToRemove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }},
+                  name
+                });
+              } catch (e) {
+                core.info(`Could not remove label ${name}: ${e.message}`);
+              }
+            }
+
+            const labelsToAdd = actionable
               ? ['triage/complete', `severity/${severity}`]
               : ['needs-info', 'triage/incomplete', `severity/${severity}`];
 
@@ -263,7 +288,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: ${{ inputs.issue_number }},
-              labels
+              labels: labelsToAdd
             });
 
       - name: Notify Teams (optional)
@@ -295,6 +320,7 @@ jobs:
                 ]
               }]
             };
+
             await fetch(process.env.TEAMS_WEBHOOK_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },

@@ -90,12 +90,14 @@ jobs:
                 "n/a",
                 "na",
                 "none",
+                "nil",
                 "tbd",
                 "todo",
                 "no response",
-                "no response yet"
-              ];
-            
+                "no response yet",
+                "not provided",
+                "not applicable"
+              ];            
               return !placeholders.includes(cleaned);
             }
             

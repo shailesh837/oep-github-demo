@@ -47,103 +47,92 @@ jobs:
           script: |
             const body = process.env.ISSUE_BODY || "";
             const lines = body.split(/\r?\n/);
-
-            const requiredSections = [
-              { key: 'description', labels: ['description'] },
-              { key: 'steps_to_reproduce', labels: ['steps to reproduce'] },
-              { key: 'expected_behavior', labels: ['expected behavior'] },
-              { key: 'version', labels: ['geti version'] },
-              { key: 'hardware', labels: ['hardware'] },
-              { key: 'operating_system', labels: ['operating system'] },
-              { key: 'logs', labels: ['screenshots, video recordings or logs'] }
-            ];
-
+            
             function normalize(text) {
-              return (text || '')
-                .replace(/[_*`>#-]/g, ' ')
-                .replace(/\s+/g, ' ')
+              return (text || "")
+                .replace(/[_*`>#-]/g, " ")
+                .replace(/\s+/g, " ")
                 .trim()
                 .toLowerCase();
             }
-
-            function isSectionHeader(line, labelOptions) {
+            
+            function canonicalHeader(line) {
               const cleaned = normalize(line)
-                .replace(/^[^a-z0-9]+/, '')
+                .replace(/^[^a-z0-9]+/, "")
                 .trim();
-              return labelOptions.some(label => cleaned === normalize(label));
+            
+              const headerMap = [
+                { key: "description", match: "description" },
+                { key: "steps_to_reproduce", match: "steps to reproduce if applicable" },
+                { key: "steps_to_reproduce", match: "steps to reproduce" },
+                { key: "expected_behavior", match: "expected behavior" },
+                { key: "logs", match: "screenshots video recordings or logs" },
+                { key: "version", match: "geti version" },
+                { key: "hardware", match: "hardware" },
+                { key: "operating_system", match: "operating system" },
+                { key: "browser", match: "browser if applicable" },
+                { key: "python_version", match: "python version if relevant" },
+                { key: "additional_context", match: "additional context" }
+              ];
+            
+              const found = headerMap.find(h => cleaned === h.match);
+              return found ? found.key : null;
             }
-
-            function extractSection(labelOptions) {
-              let startIndex = -1;
-
-              for (let i = 0; i < lines.length; i++) {
-                if (isSectionHeader(lines[i], labelOptions)) {
-                  startIndex = i;
-                  break;
-                }
+            
+            const sections = {};
+            let currentKey = null;
+            
+            for (const line of lines) {
+              const maybeHeader = canonicalHeader(line);
+            
+              if (maybeHeader) {
+                currentKey = maybeHeader;
+                if (!sections[currentKey]) sections[currentKey] = [];
+                continue;
               }
-
-              if (startIndex === -1) return '';
-
-              const collected = [];
-              for (let j = startIndex + 1; j < lines.length; j++) {
-                const original = lines[j];
-                const trimmed = original.trim();
-
-                if (trimmed.length === 0) {
-                  if (collected.length > 0) collected.push(original);
-                  continue;
-                }
-
-                const nextKnownHeader = requiredSections.some(section =>
-                  isSectionHeader(original, section.labels)
-                );
-                if (nextKnownHeader) break;
-
-                const genericFieldHeader =
-                  /^[^a-zA-Z0-9]*[A-Z][^:]{0,80}$/.test(trimmed) &&
-                  !/[.!?]$/.test(trimmed);
-                if (genericFieldHeader && collected.length > 0) break;
-
-                collected.push(original);
+            
+              if (currentKey) {
+                sections[currentKey].push(line);
               }
-
-              return collected.join('\n').trim();
             }
-
+            
+            function sectionText(key) {
+              return (sections[key] || []).join("\n").trim();
+            }
+            
             function isMeaningful(text) {
               const cleaned = normalize(text);
               if (!cleaned) return false;
               if (cleaned.length < 5) return false;
-
+            
               const placeholders = [
-                'n/a',
-                'na',
-                'none',
-                'tbd',
-                'todo',
-                'no response',
-                'no response yet',
-                'short description',
-                'software',
-                'summary'
+                "n/a",
+                "na",
+                "none",
+                "tbd",
+                "todo",
+                "no response",
+                "no response yet",
+                "short description",
+                "software",
+                "summary"
               ];
-
+            
               return !placeholders.includes(cleaned);
             }
-
-            const findings = requiredSections.map(section => {
-              const value = extractSection(section.labels);
-              return {
-                key: section.key,
-                present: isMeaningful(value),
-                value
-              };
-            });
-
-            const byKey = Object.fromEntries(findings.map(f => [f.key, f.present]));
+      
+            const byKey = {
+              description: isMeaningful(sectionText("description")),
+              steps_to_reproduce: isMeaningful(sectionText("steps_to_reproduce")),
+              expected_behavior: isMeaningful(sectionText("expected_behavior")),
+              version: isMeaningful(sectionText("version")),
+              hardware: isMeaningful(sectionText("hardware")),
+              operating_system: isMeaningful(sectionText("operating_system")),
+              logs: isMeaningful(sectionText("logs"))
+            };
+            
             const environmentPresent = byKey.hardware || byKey.operating_system;
-
+            
             const presentCount = [
               byKey.description,
               byKey.steps_to_reproduce,
@@ -152,36 +141,36 @@ jobs:
               environmentPresent,
               byKey.logs
             ].filter(Boolean).length;
-
+            
             const score = Math.round((presentCount / 6) * 100);
-
+            
             const missing = [];
-            if (!byKey.description) missing.push('description');
-            if (!byKey.steps_to_reproduce) missing.push('steps_to_reproduce');
-            if (!byKey.expected_behavior) missing.push('expected_behavior');
-            if (!byKey.version) missing.push('version');
-            if (!environmentPresent) missing.push('environment');
-            if (!byKey.logs) missing.push('logs');
-
+            if (!byKey.description) missing.push("description");
+            if (!byKey.steps_to_reproduce) missing.push("steps_to_reproduce");
+            if (!byKey.expected_behavior) missing.push("expected_behavior");
+            if (!byKey.version) missing.push("version");
+            if (!environmentPresent) missing.push("environment");
+            if (!byKey.logs) missing.push("logs");
+            
             const actionable =
               byKey.description &&
               byKey.steps_to_reproduce &&
               byKey.expected_behavior &&
               environmentPresent &&
               byKey.version;
-
-            const severity = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high';
-
+            
+            const severity = score >= 85 ? "low" : score >= 60 ? "medium" : "high";
+            
             const fallbackSummary = actionable
               ? `Issue appears mostly complete. Score: ${score}/100.`
-              : `Issue is incomplete. Score: ${score}/100. Missing: ${missing.join(', ')}.`;
-
-            core.setOutput('score', String(score));
-            core.setOutput('severity', severity);
-            core.setOutput('missing', JSON.stringify(missing));
-            core.setOutput('actionable', String(actionable));
-            core.setOutput('summary', fallbackSummary);
-
+              : `Issue is incomplete. Score: ${score}/100. Missing: ${missing.join(", ")}.`;
+            
+            core.setOutput("score", String(score));
+            core.setOutput("severity", severity);
+            core.setOutput("missing", JSON.stringify(missing));
+            core.setOutput("actionable", String(actionable));
+            core.setOutput("summary", fallbackSummary);
+      
       - name: Generate AI enrichment with Claude (optional)
         id: ai
         if: ${{ env.GNAI_API_KEY != '' }}

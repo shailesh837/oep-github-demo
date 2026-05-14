@@ -100,6 +100,17 @@ jobs:
                 .join("\n")
                 .trim();
             }
+
+            function hasAttachmentEvidence(text) {
+              const raw = text || "";
+            
+              return (
+                /\b[\w.-]+\.(log|txt|zip|png|jpg|jpeg|mp4|mov)\b/i.test(raw) ||
+                /https?:\/\/\S+/i.test(raw) ||
+                /user-images\.githubusercontent\.com/i.test(raw) ||
+                /githubusercontent\.com\/attachments/i.test(raw)
+              );
+            }
             
             function isMeaningful(text) {
               const cleaned = normalize(text);
@@ -144,7 +155,7 @@ jobs:
               version: isMeaningful(values.version),
               hardware: isMeaningful(values.hardware),
               operating_system: isMeaningful(values.operating_system),
-              logs: isMeaningful(values.logs)
+              logs: isMeaningful(values.logs) || hasAttachmentEvidence(body)
             };
             
             const environmentPresent = byKey.hardware || byKey.operating_system;

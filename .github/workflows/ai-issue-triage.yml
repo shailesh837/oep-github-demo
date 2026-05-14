@@ -46,53 +46,70 @@ jobs:
         with:
           script: |
             const body = process.env.ISSUE_BODY || "";
-            const normalizedBody = body
-              .replace(/\r/g, "")
-              .toLowerCase();
-            
-            function hasSection(label) {
-              return normalizedBody.includes(label);
-            }
-            
-            function extractAfter(label, stopLabels = []) {
-              const idx = normalizedBody.indexOf(label);
-              if (idx === -1) return "";
-            
-              const originalLower = body.toLowerCase();
-              const start = originalLower.indexOf(label);
-              if (start === -1) return "";
-            
-              let slice = body.slice(start + label.length);
-            
-              let end = slice.length;
-              for (const stopLabel of stopLabels) {
-                const stopIdx = slice.toLowerCase().indexOf(stopLabel);
-                if (stopIdx !== -1 && stopIdx < end) end = stopIdx;
-              }
-            
-              return slice.slice(0, end).trim();
-            }
+            const lines = body.split(/\r?\n/);
             
             function normalize(text) {
               return (text || "")
-                .replace(/[_*`>#-]/g, " ")
+                .replace(/[_*`>#]/g, " ")
                 .replace(/\s+/g, " ")
                 .trim()
                 .toLowerCase();
             }
             
+            function canonicalHeader(line) {
+              const cleaned = normalize(line).replace(/^[^a-z0-9]+/, "").trim();
+            
+              const headerMap = {
+                "issue type": "issue_type",
+                "description": "description",
+                "steps to reproduce (if applicable)": "steps_to_reproduce",
+                "steps to reproduce": "steps_to_reproduce",
+                "expected behavior": "expected_behavior",
+                "screenshots, video recordings or logs": "logs",
+                "geti version": "version",
+                "hardware": "hardware",
+                "operating system": "operating_system",
+                "browser (if applicable)": "browser",
+                "python version (if relevant)": "python_version",
+                "additional context": "additional_context"
+              };
+            
+              return headerMap[cleaned] || null;
+            }
+            
+            const sections = {};
+            let currentKey = null;
+            
+            for (const rawLine of lines) {
+              const line = rawLine.trim();
+              const header = canonicalHeader(line);
+            
+              if (header) {
+                currentKey = header;
+                if (!sections[currentKey]) sections[currentKey] = [];
+                continue;
+              }
+            
+              if (currentKey) {
+                sections[currentKey].push(rawLine);
+              }
+            }
+            
+            function getSectionText(key) {
+              return (sections[key] || [])
+                .join("\n")
+                .trim();
+            }
+            
             function isMeaningful(text) {
               const cleaned = normalize(text);
+            
               if (!cleaned) return false;
-              if (cleaned.length < 5) return false;
             
               const placeholders = [
                 "n/a",
                 "na",
-                "NA",
-                "N.A",
-                "None",
-                "N/A",
+                "n a",
                 "none",
                 "nil",
                 "tbd",
@@ -101,39 +118,33 @@ jobs:
                 "no response yet",
                 "not provided",
                 "not applicable"
-              ];            
-              return !placeholders.includes(cleaned);
+              ];
+            
+              if (placeholders.includes(cleaned)) return false;
+            
+              if (cleaned.length < 5) return false;
+            
+              return true;
             }
             
-            const labels = [
-              "description",
-              "steps to reproduce",
-              "expected behavior",
-              "screenshots, video recordings or logs",
-              "geti version",
-              "hardware",
-              "operating system",
-              "browser",
-              "python version",
-              "additional context"
-            ];
-            
-            const descriptionText = extractAfter("description", labels.filter(x => x !== "description"));
-            const stepsText = extractAfter("steps to reproduce", labels.filter(x => x !== "steps to reproduce"));
-            const expectedText = extractAfter("expected behavior", labels.filter(x => x !== "expected behavior"));
-            const logsText = extractAfter("screenshots, video recordings or logs", labels.filter(x => x !== "screenshots, video recordings or logs"));
-            const versionText = extractAfter("geti version", labels.filter(x => x !== "geti version"));
-            const hardwareText = extractAfter("hardware", labels.filter(x => x !== "hardware"));
-            const osText = extractAfter("operating system", labels.filter(x => x !== "operating system"));
+            const values = {
+              description: getSectionText("description"),
+              steps_to_reproduce: getSectionText("steps_to_reproduce"),
+              expected_behavior: getSectionText("expected_behavior"),
+              version: getSectionText("version"),
+              hardware: getSectionText("hardware"),
+              operating_system: getSectionText("operating_system"),
+              logs: getSectionText("logs")
+            };
             
             const byKey = {
-              description: isMeaningful(descriptionText),
-              steps_to_reproduce: isMeaningful(stepsText),
-              expected_behavior: isMeaningful(expectedText),
-              version: isMeaningful(versionText),
-              hardware: isMeaningful(hardwareText),
-              operating_system: isMeaningful(osText),
-              logs: isMeaningful(logsText)
+              description: isMeaningful(values.description),
+              steps_to_reproduce: isMeaningful(values.steps_to_reproduce),
+              expected_behavior: isMeaningful(values.expected_behavior),
+              version: isMeaningful(values.version),
+              hardware: isMeaningful(values.hardware),
+              operating_system: isMeaningful(values.operating_system),
+              logs: isMeaningful(values.logs)
             };
             
             const environmentPresent = byKey.hardware || byKey.operating_system;
@@ -161,8 +172,8 @@ jobs:
               byKey.description &&
               byKey.steps_to_reproduce &&
               byKey.expected_behavior &&
-              environmentPresent &&
               byKey.version &&
+              environmentPresent &&
               byKey.logs;
             
             const severity = score >= 85 ? "low" : score >= 60 ? "medium" : "high";
@@ -170,6 +181,9 @@ jobs:
             const fallbackSummary = actionable
               ? `Issue appears mostly complete. Score: ${score}/100.`
               : `Issue is incomplete. Score: ${score}/100. Missing: ${missing.join(", ")}.`;
+            
+            core.info(`Parsed values: ${JSON.stringify(values, null, 2)}`);
+            core.info(`Presence map: ${JSON.stringify(byKey, null, 2)}`);
             
             core.setOutput("score", String(score));
             core.setOutput("severity", severity);

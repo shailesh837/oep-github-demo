@@ -46,7 +46,32 @@ jobs:
         with:
           script: |
             const body = process.env.ISSUE_BODY || "";
-            const lines = body.split(/\r?\n/);
+            const normalizedBody = body
+              .replace(/\r/g, "")
+              .toLowerCase();
+            
+            function hasSection(label) {
+              return normalizedBody.includes(label);
+            }
+            
+            function extractAfter(label, stopLabels = []) {
+              const idx = normalizedBody.indexOf(label);
+              if (idx === -1) return "";
+            
+              const originalLower = body.toLowerCase();
+              const start = originalLower.indexOf(label);
+              if (start === -1) return "";
+            
+              let slice = body.slice(start + label.length);
+            
+              let end = slice.length;
+              for (const stopLabel of stopLabels) {
+                const stopIdx = slice.toLowerCase().indexOf(stopLabel);
+                if (stopIdx !== -1 && stopIdx < end) end = stopIdx;
+              }
+            
+              return slice.slice(0, end).trim();
+            }
             
             function normalize(text) {
               return (text || "")
@@ -54,50 +79,6 @@ jobs:
                 .replace(/\s+/g, " ")
                 .trim()
                 .toLowerCase();
-            }
-            
-            function canonicalHeader(line) {
-              const cleaned = normalize(line)
-                .replace(/^[^a-z0-9]+/, "")
-                .trim();
-            
-              const headerMap = [
-                { key: "description", match: "description" },
-                { key: "steps_to_reproduce", match: "steps to reproduce if applicable" },
-                { key: "steps_to_reproduce", match: "steps to reproduce" },
-                { key: "expected_behavior", match: "expected behavior" },
-                { key: "logs", match: "screenshots video recordings or logs" },
-                { key: "version", match: "geti version" },
-                { key: "hardware", match: "hardware" },
-                { key: "operating_system", match: "operating system" },
-                { key: "browser", match: "browser if applicable" },
-                { key: "python_version", match: "python version if relevant" },
-                { key: "additional_context", match: "additional context" }
-              ];
-            
-              const found = headerMap.find(h => cleaned === h.match);
-              return found ? found.key : null;
-            }
-            
-            const sections = {};
-            let currentKey = null;
-            
-            for (const line of lines) {
-              const maybeHeader = canonicalHeader(line);
-            
-              if (maybeHeader) {
-                currentKey = maybeHeader;
-                if (!sections[currentKey]) sections[currentKey] = [];
-                continue;
-              }
-            
-              if (currentKey) {
-                sections[currentKey].push(line);
-              }
-            }
-            
-            function sectionText(key) {
-              return (sections[key] || []).join("\n").trim();
             }
             
             function isMeaningful(text) {
@@ -112,23 +93,41 @@ jobs:
                 "tbd",
                 "todo",
                 "no response",
-                "no response yet",
-                "short description",
-                "software",
-                "summary"
+                "no response yet"
               ];
             
               return !placeholders.includes(cleaned);
             }
-      
+            
+            const labels = [
+              "description",
+              "steps to reproduce",
+              "expected behavior",
+              "screenshots, video recordings or logs",
+              "geti version",
+              "hardware",
+              "operating system",
+              "browser",
+              "python version",
+              "additional context"
+            ];
+            
+            const descriptionText = extractAfter("description", labels.filter(x => x !== "description"));
+            const stepsText = extractAfter("steps to reproduce", labels.filter(x => x !== "steps to reproduce"));
+            const expectedText = extractAfter("expected behavior", labels.filter(x => x !== "expected behavior"));
+            const logsText = extractAfter("screenshots, video recordings or logs", labels.filter(x => x !== "screenshots, video recordings or logs"));
+            const versionText = extractAfter("geti version", labels.filter(x => x !== "geti version"));
+            const hardwareText = extractAfter("hardware", labels.filter(x => x !== "hardware"));
+            const osText = extractAfter("operating system", labels.filter(x => x !== "operating system"));
+            
             const byKey = {
-              description: isMeaningful(sectionText("description")),
-              steps_to_reproduce: isMeaningful(sectionText("steps_to_reproduce")),
-              expected_behavior: isMeaningful(sectionText("expected_behavior")),
-              version: isMeaningful(sectionText("version")),
-              hardware: isMeaningful(sectionText("hardware")),
-              operating_system: isMeaningful(sectionText("operating_system")),
-              logs: isMeaningful(sectionText("logs"))
+              description: isMeaningful(descriptionText),
+              steps_to_reproduce: isMeaningful(stepsText),
+              expected_behavior: isMeaningful(expectedText),
+              version: isMeaningful(versionText),
+              hardware: isMeaningful(hardwareText),
+              operating_system: isMeaningful(osText),
+              logs: isMeaningful(logsText)
             };
             
             const environmentPresent = byKey.hardware || byKey.operating_system;
@@ -157,7 +156,8 @@ jobs:
               byKey.steps_to_reproduce &&
               byKey.expected_behavior &&
               environmentPresent &&
-              byKey.version;
+              byKey.version &&
+              byKey.logs;
             
             const severity = score >= 85 ? "low" : score >= 60 ? "medium" : "high";
             

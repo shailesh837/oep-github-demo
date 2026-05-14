@@ -114,7 +114,7 @@ jobs:
 
       - name: Generate AI enrichment with Claude (optional)
         id: ai
-        if: ${{ secrets.GNAI_API_KEY != '' }}
+        if: ${{ env.GNAI_API_KEY != '' }}
         continue-on-error: true
         env:
           GNAI_API_KEY: ${{ secrets.GNAI_API_KEY }}
@@ -213,7 +213,7 @@ jobs:
             });
 
       - name: Notify Teams (optional)
-        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+        if: ${{ env.TEAMS_WEBHOOK_URL != '' }}
         uses: actions/github-script@v7
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}

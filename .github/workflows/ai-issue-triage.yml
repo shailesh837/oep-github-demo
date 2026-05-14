@@ -58,37 +58,6 @@ jobs:
               { key: 'logs', labels: ['screenshots, video recordings or logs'] }
             ];
 
-            function extractSection(labelOptions) {
-              const lower = lines.map(l => l.toLowerCase());
-            
-              for (const label of labelOptions) {
-                for (let i = 0; i < lower.length; i++) {
-                  const line = lower[i].trim();
-            
-                  if (line.includes(label)) {
-                    const collected = [];
-            
-                    for (let j = i + 1; j < lines.length; j++) {
-                      const original = lines[j];
-                      const trimmed = original.trim();
-            
-                      if (/^#{1,6}\s+/.test(trimmed)) break;
-                      if (trimmed.length === 0) {
-                        collected.push(original);
-                        continue;
-                      }
-            
-                      collected.push(original);
-                    }
-            
-                    return collected.join('\n').trim();
-                  }
-                }
-              }
-            
-              return '';
-            }
-
             function normalize(text) {
               return (text || '')
                 .replace(/[_*`>#-]/g, ' ')
@@ -97,10 +66,55 @@ jobs:
                 .toLowerCase();
             }
 
+            function isSectionHeader(line, labelOptions) {
+              const cleaned = normalize(line)
+                .replace(/^[^a-z0-9]+/, '')
+                .trim();
+              return labelOptions.some(label => cleaned === normalize(label));
+            }
+
+            function extractSection(labelOptions) {
+              let startIndex = -1;
+
+              for (let i = 0; i < lines.length; i++) {
+                if (isSectionHeader(lines[i], labelOptions)) {
+                  startIndex = i;
+                  break;
+                }
+              }
+
+              if (startIndex === -1) return '';
+
+              const collected = [];
+              for (let j = startIndex + 1; j < lines.length; j++) {
+                const original = lines[j];
+                const trimmed = original.trim();
+
+                if (trimmed.length === 0) {
+                  if (collected.length > 0) collected.push(original);
+                  continue;
+                }
+
+                const nextKnownHeader = requiredSections.some(section =>
+                  isSectionHeader(original, section.labels)
+                );
+                if (nextKnownHeader) break;
+
+                const genericFieldHeader =
+                  /^[^a-zA-Z0-9]*[A-Z][^:]{0,80}$/.test(trimmed) &&
+                  !/[.!?]$/.test(trimmed);
+                if (genericFieldHeader && collected.length > 0) break;
+
+                collected.push(original);
+              }
+
+              return collected.join('\n').trim();
+            }
+
             function isMeaningful(text) {
               const cleaned = normalize(text);
               if (!cleaned) return false;
-              if (cleaned.length < 12) return false;
+              if (cleaned.length < 5) return false;
 
               const placeholders = [
                 'n/a',
@@ -109,6 +123,7 @@ jobs:
                 'tbd',
                 'todo',
                 'no response',
+                'no response yet',
                 'short description',
                 'software',
                 'summary'

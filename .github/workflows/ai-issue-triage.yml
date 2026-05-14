@@ -48,14 +48,43 @@ jobs:
             const body = process.env.ISSUE_BODY || "";
             const lines = body.split(/\r?\n/);
 
-            const requiredSections = [
-              { key: 'description', labels: ['description', 'bug description'] },
-              { key: 'steps_to_reproduce', labels: ['steps to reproduce', 'reproducible steps'] },
-              { key: 'expected_behavior', labels: ['expected behavior'] },
-              { key: 'version', labels: ['geti version', 'software version', 'version'] },
-              { key: 'environment', labels: ['operating system', 'os', 'hardware', 'system setup'] },
-              { key: 'logs', labels: ['screenshots, video recordings or logs', 'logs', 'screenshots'] }
-            ];
+            const findings = requiredSections.map(section => {
+              const value = extractSection(section.labels);
+              return {
+                key: section.key,
+                present: isMeaningful(value),
+                value
+              };
+            });
+            
+            const byKey = Object.fromEntries(findings.map(f => [f.key, f.present]));
+            const environmentPresent = byKey.hardware || byKey.operating_system;
+            
+            const presentCount = [
+                byKey.description,
+                byKey.steps_to_reproduce,
+                byKey.expected_behavior,
+                byKey.version,
+                environmentPresent,
+                byKey.logs
+            ].filter(Boolean).length;
+            
+            const score = Math.round((presentCount / 6) * 100);
+            
+            const missing = [];
+            if (!byKey.description) missing.push('description');
+            if (!byKey.steps_to_reproduce) missing.push('steps_to_reproduce');
+            if (!byKey.expected_behavior) missing.push('expected_behavior');
+            if (!byKey.version) missing.push('version');
+            if (!environmentPresent) missing.push('environment');
+            if (!byKey.logs) missing.push('logs');
+            
+            const actionable =
+              byKey.description &&
+              byKey.steps_to_reproduce &&
+              byKey.expected_behavior &&
+              environmentPresent &&
+              byKey.version;
 
             function extractSection(labelOptions) {
               const lower = lines.map(l => l.toLowerCase());

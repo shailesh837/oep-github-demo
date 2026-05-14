@@ -107,7 +107,7 @@ jobs:
               : `Issue is incomplete. Score: ${score}/100. Missing: ${missing.join(', ')}.`;
 
             core.setOutput('score', String(score));
-            core.setOutput('severity', severity));
+            core.setOutput('severity', severity);
             core.setOutput('missing', JSON.stringify(missing));
             core.setOutput('actionable', String(actionable));
             core.setOutput('summary', fallbackSummary);

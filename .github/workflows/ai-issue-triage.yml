@@ -1,1 +1,248 @@
+name: Reusable Issue Triage Demo
 
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      repository:
+        required: true
+        type: string
+      issue_title:
+        required: true
+        type: string
+      issue_body:
+        required: false
+        type: string
+      issue_html_url:
+        required: true
+        type: string
+      issue_user_login:
+        required: true
+        type: string
+    secrets:
+      TEAMS_WEBHOOK_URL:
+        required: false
+      GNAI_API_KEY:
+        required: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate issue completeness
+        id: evaluate
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          ISSUE_URL: ${{ inputs.issue_html_url }}
+          ISSUE_USER: ${{ inputs.issue_user_login }}
+        with:
+          script: |
+            const body = process.env.ISSUE_BODY || "";
+            const lines = body.split(/\r?\n/);
+
+            const requiredSections = [
+              { key: 'description', labels: ['description', 'bug description'] },
+              { key: 'steps_to_reproduce', labels: ['steps to reproduce', 'reproducible steps'] },
+              { key: 'expected_behavior', labels: ['expected behavior'] },
+              { key: 'version', labels: ['geti version', 'software version', 'version'] },
+              { key: 'environment', labels: ['operating system', 'os', 'hardware', 'system setup'] },
+              { key: 'logs', labels: ['screenshots, video recordings or logs', 'logs', 'screenshots'] }
+            ];
+
+            function extractSection(labelOptions) {
+              const lower = lines.map(l => l.toLowerCase());
+              for (const label of labelOptions) {
+                for (let i = 0; i < lower.length; i++) {
+                  const line = lower[i].trim();
+                  if (line.includes(label)) {
+                    let collected = [];
+                    for (let j = i + 1; j < lines.length; j++) {
+                      const original = lines[j];
+                      const candidate = original.trim();
+                      const candidateLower = candidate.toLowerCase();
+                      const nextHeader = requiredSections.some(sec => sec.labels.some(lbl => candidateLower.includes(lbl)));
+                      if (nextHeader && candidate.length > 0) break;
+                      collected.push(original);
+                    }
+                    return collected.join('\n').trim();
+                  }
+                }
+              }
+              return '';
+            }
+
+            function isMeaningful(text) {
+              if (!text) return false;
+              const cleaned = text.trim().toLowerCase();
+              if (cleaned.length < 10) return false;
+              const placeholders = ['n/a', 'na', 'none', 'tbd', 'todo', '<short description>', '<software>', '<summary>'];
+              return !placeholders.includes(cleaned);
+            }
+
+            const findings = requiredSections.map(section => {
+              const value = extractSection(section.labels);
+              return {
+                key: section.key,
+                present: isMeaningful(value),
+                value
+              };
+            });
+
+            const presentCount = findings.filter(f => f.present).length;
+            const score = Math.round((presentCount / requiredSections.length) * 100);
+            const missing = findings.filter(f => !f.present).map(f => f.key);
+            const actionable = missing.length <= 1;
+            const severity = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high';
+
+            const fallbackSummary = actionable
+              ? `Issue appears mostly complete. Score: ${score}/100.`
+              : `Issue is incomplete. Score: ${score}/100. Missing: ${missing.join(', ')}.`;
+
+            core.setOutput('score', String(score));
+            core.setOutput('severity', severity);
+            core.setOutput('missing', JSON.stringify(missing));
+            core.setOutput('actionable', String(actionable));
+            core.setOutput('summary', fallbackSummary);
+
+      - name: Generate AI enrichment with Claude (optional)
+        id: ai
+        if: ${{ secrets.GNAI_API_KEY != '' }}
+        continue-on-error: true
+        env:
+          GNAI_API_KEY: ${{ secrets.GNAI_API_KEY }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+        run: |
+          python - <<'PY'
+          import json, os
+          missing = json.loads(os.environ.get('MISSING', '[]'))
+          summary = {
+            'maintainer_summary': f"AI triage summary for '{os.environ.get('ISSUE_TITLE','')}': score {os.environ.get('SCORE')} / 100, severity {os.environ.get('SEVERITY')}. Missing fields: {', '.join(missing) if missing else 'none'}.",
+            'reporter_comment': (
+              'Thanks for filing this issue. '
+              + (f"Please add the following missing information so maintainers can investigate faster: {', '.join(missing)}." if missing else 'The report looks complete enough for maintainer triage.')
+            )
+          }
+          with open('ai-output.json', 'w', encoding='utf-8') as f:
+            json.dump(summary, f)
+          PY
+          echo "ai_generated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compose issue comment
+        id: comment
+        uses: actions/github-script@v7
+        env:
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+        with:
+          script: |
+            const fs = require('fs');
+            let ai = null;
+            try {
+              ai = JSON.parse(fs.readFileSync('ai-output.json', 'utf8'));
+            } catch (e) {}
+
+            const missing = JSON.parse(process.env.MISSING || '[]');
+            const actionable = process.env.ACTIONABLE === 'true';
+            const score = process.env.SCORE;
+            const severity = process.env.SEVERITY;
+
+            const body = ai?.reporter_comment || (
+              actionable
+                ? `Thanks for the report. This issue appears sufficiently complete for maintainer triage.`
+                : `Thanks for the report. Please add the missing information: ${missing.join(', ')}.`
+            );
+
+            const fullComment = [
+              '## Automated issue triage',
+              '',
+              `- Completeness score: **${score}/100**`,
+              `- Suggested severity: **${severity}**`,
+              `- Actionable: **${actionable ? 'yes' : 'needs more info'}**`,
+              `- Missing fields: **${missing.length ? missing.join(', ') : 'none'}**`,
+              '',
+              body,
+              '',
+              '_This is a demo triage workflow using rules with optional AI enrichment._'
+            ].join('\n');
+
+            core.setOutput('body', fullComment);
+
+      - name: Comment on issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: `${{ steps.comment.outputs.body }}`
+            });
+
+      - name: Apply labels
+        uses: actions/github-script@v7
+        env:
+          ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+        with:
+          script: |
+            const actionable = process.env.ACTIONABLE === 'true';
+            const severity = process.env.SEVERITY;
+            const labels = actionable
+              ? ['triage/complete', `severity/${severity}`]
+              : ['needs-info', 'triage/incomplete', `severity/${severity}`];
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels
+            });
+
+      - name: Notify Teams (optional)
+        if: ${{ secrets.TEAMS_WEBHOOK_URL != '' }}
+        uses: actions/github-script@v7
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+          ISSUE_URL: ${{ inputs.issue_html_url }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_USER: ${{ inputs.issue_user_login }}
+        with:
+          script: |
+            const missing = JSON.parse(process.env.MISSING || '[]');
+            const card = {
+              '@type': 'MessageCard',
+              '@context': 'http://schema.org/extensions',
+              themeColor: '0076D7',
+              title: 'Issue triage result',
+              sections: [{
+                activityTitle: `Issue triaged: [${process.env.ISSUE_TITLE}](${process.env.ISSUE_URL})`,
+                facts: [
+                  { name: 'Reporter', value: process.env.ISSUE_USER },
+                  { name: 'Score', value: `${process.env.SCORE}/100` },
+                  { name: 'Severity', value: process.env.SEVERITY },
+                  { name: 'Missing fields', value: missing.length ? missing.join(', ') : 'none' }
+                ]
+              }]
+            };
+            await fetch(process.env.TEAMS_WEBHOOK_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(card)
+            });

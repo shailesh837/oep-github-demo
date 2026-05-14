@@ -99,7 +99,12 @@ jobs:
             const presentCount = findings.filter(f => f.present).length;
             const score = Math.round((presentCount / requiredSections.length) * 100);
             const missing = findings.filter(f => !f.present).map(f => f.key);
-            const actionable = missing.length <= 1;
+            const byKey = Object.fromEntries(findings.map(f => [f.key, f.present]));
+            const actionable =
+              byKey.description &&
+              byKey.steps_to_reproduce &&
+              byKey.expected_behavior &&
+              (byKey.environment || byKey.logs);
             const severity = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high';
 
             const fallbackSummary = actionable

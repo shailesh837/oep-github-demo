@@ -60,25 +60,32 @@ jobs:
 
             function extractSection(labelOptions) {
               const lower = lines.map(l => l.toLowerCase());
+            
               for (const label of labelOptions) {
                 for (let i = 0; i < lower.length; i++) {
                   const line = lower[i].trim();
+            
                   if (line.includes(label)) {
-                    let collected = [];
+                    const collected = [];
+            
                     for (let j = i + 1; j < lines.length; j++) {
                       const original = lines[j];
-                      const candidate = original.trim();
-                      const candidateLower = candidate.toLowerCase();
-                      const nextHeader = requiredSections.some(sec =>
-                        sec.labels.some(lbl => candidateLower.includes(lbl))
-                      );
-                      if (nextHeader && candidate.length > 0) break;
+                      const trimmed = original.trim();
+            
+                      if (/^#{1,6}\s+/.test(trimmed)) break;
+                      if (trimmed.length === 0) {
+                        collected.push(original);
+                        continue;
+                      }
+            
                       collected.push(original);
                     }
+            
                     return collected.join('\n').trim();
                   }
                 }
               }
+            
               return '';
             }
 

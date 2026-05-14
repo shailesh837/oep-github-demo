@@ -79,12 +79,32 @@ jobs:
               return '';
             }
 
+            function normalize(text) {
+                return (text || '')
+                  .replace(/[_*`>#-]/g, ' ')
+                  .replace(/\s+/g, ' ')
+                  .trim()
+                  .toLowerCase();
+            }
+              
             function isMeaningful(text) {
-              if (!text) return false;
-              const cleaned = text.trim().toLowerCase();
-              if (cleaned.length < 10) return false;
-              const placeholders = ['n/a', 'na', 'none', 'tbd', 'todo', '<short description>', '<software>', '<summary>', 'no response'];
-              return !placeholders.includes(cleaned);
+                const cleaned = normalize(text);
+                if (!cleaned) return false;
+                if (cleaned.length < 12) return false;
+              
+                const placeholders = [
+                  'n/a',
+                  'na',
+                  'none',
+                  'tbd',
+                  'todo',
+                  'no response',
+                  'short description',
+                  'software',
+                  'summary'
+                ];
+              
+                return !placeholders.includes(cleaned);
             }
 
             const findings = requiredSections.map(section => {

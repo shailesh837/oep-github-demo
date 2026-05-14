@@ -89,6 +89,10 @@ jobs:
               const placeholders = [
                 "n/a",
                 "na",
+                "NA",
+                "N.A",
+                "None",
+                "N/A",
                 "none",
                 "nil",
                 "tbd",

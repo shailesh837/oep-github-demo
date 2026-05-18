@@ -38,6 +38,8 @@ on:
     secrets:
       TEAMS_WEBHOOK_URL:
         required: false
+      ASSIGNEE_EMAIL_MAP:
+        required: false
       GNAI_API_KEY:
         required: false
       # Keep internal reporter mapping private via secret (JSON array or comma-separated usernames)

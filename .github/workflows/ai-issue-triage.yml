@@ -1,0 +1,449 @@
+name: Reusable Issue Triage Demo
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      repository:
+        required: true
+        type: string
+      issue_title:
+        required: true
+        type: string
+      issue_body:
+        required: false
+        type: string
+      issue_html_url:
+        required: true
+        type: string
+      issue_user_login:
+        required: true
+        type: string
+      primary_external_assignee:
+        required: false
+        type: string
+      secondary_external_assignee:
+        required: false
+        type: string
+      external_assignment_threshold:
+        required: false
+        type: number
+        default: 10
+      assign_external_actionable:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      TEAMS_WEBHOOK_URL:
+        required: false
+      GNAI_API_KEY:
+        required: false
+      # Keep internal reporter mapping private via secret (JSON array or comma-separated usernames)
+      INTERNAL_REPORTER_ALLOWLIST:
+        required: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate issue completeness
+        id: evaluate
+        uses: actions/github-script@v7
+        env:
+          ISSUE_BODY: ${{ inputs.issue_body }}
+        with:
+          script: |
+            const body = process.env.ISSUE_BODY || "";
+            const lines = body.split(/\r?\n/);
+
+            function normalize(text) {
+              return (text || "")
+                .replace(/[_*`>#]/g, " ")
+                .replace(/\s+/g, " ")
+                .trim()
+                .toLowerCase();
+            }
+
+            function canonicalHeader(line) {
+              const cleaned = normalize(line)
+                .replace(/^#+\s*/, "")
+                .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+
+              if (!cleaned) return null;
+              if (cleaned.includes("issue type")) return "issue_type";
+              if (cleaned.includes("description")) return "description";
+              if (cleaned.includes("steps to reproduce")) return "steps_to_reproduce";
+              if (cleaned.includes("expected behavior")) return "expected_behavior";
+              if (cleaned.includes("screenshots") || cleaned.includes("video recordings") || cleaned === "logs") return "logs";
+              if (cleaned.includes("geti version") || cleaned.endsWith("version")) return "version";
+              if (cleaned === "hardware") return "hardware";
+              if (cleaned.includes("operating system")) return "operating_system";
+              if (cleaned.includes("browser")) return "browser";
+              if (cleaned.includes("python version")) return "python_version";
+              if (cleaned.includes("additional context")) return "additional_context";
+              return null;
+            }
+
+            const sections = {};
+            let currentKey = null;
+
+            for (const rawLine of lines) {
+              const header = canonicalHeader(rawLine);
+              if (header) {
+                currentKey = header;
+                if (!sections[currentKey]) sections[currentKey] = [];
+                continue;
+              }
+
+              if (currentKey) {
+                sections[currentKey].push(rawLine);
+              }
+            }
+
+            function getSectionText(key) {
+              return (sections[key] || []).join("\n").trim();
+            }
+
+            function hasAttachmentEvidence(text) {
+              const raw = text || "";
+              return (
+                /\b[\w.-]+\.(log|txt|zip|png|jpg|jpeg|mp4|mov)\b/i.test(raw) ||
+                /https?:\/\/\S+/i.test(raw) ||
+                /user-images\.githubusercontent\.com/i.test(raw) ||
+                /githubusercontent\.com\/attachments/i.test(raw)
+              );
+            }
+
+            function isMeaningful(text) {
+              const cleaned = normalize(text);
+              const compact = cleaned.replace(/[.\s]/g, "");
+              if (!cleaned) return false;
+
+              const placeholders = [
+                "n/a",
+                "na",
+                "none",
+                "nil",
+                "tbd",
+                "todo",
+                "no response",
+                "no response yet",
+                "not provided",
+                "not applicable"
+              ];
+
+              if (placeholders.includes(cleaned) || placeholders.includes(compact)) return false;
+              if (cleaned.length < 5) return false;
+              return true;
+            }
+
+            const values = {
+              description: getSectionText("description"),
+              steps_to_reproduce: getSectionText("steps_to_reproduce"),
+              expected_behavior: getSectionText("expected_behavior"),
+              version: getSectionText("version"),
+              hardware: getSectionText("hardware"),
+              operating_system: getSectionText("operating_system"),
+              logs: getSectionText("logs")
+            };
+
+            const byKey = {
+              description: isMeaningful(values.description),
+              steps_to_reproduce: isMeaningful(values.steps_to_reproduce),
+              expected_behavior: isMeaningful(values.expected_behavior),
+              version: isMeaningful(values.version),
+              hardware: isMeaningful(values.hardware),
+              operating_system: isMeaningful(values.operating_system),
+              logs: isMeaningful(values.logs) || hasAttachmentEvidence(body)
+            };
+
+            const environmentPresent = byKey.hardware || byKey.operating_system;
+
+            const presentCount = [
+              byKey.description,
+              byKey.steps_to_reproduce,
+              byKey.expected_behavior,
+              byKey.version,
+              environmentPresent,
+              byKey.logs
+            ].filter(Boolean).length;
+
+            const score = Math.round((presentCount / 6) * 100);
+
+            const missing = [];
+            if (!byKey.description) missing.push("description");
+            if (!byKey.steps_to_reproduce) missing.push("steps_to_reproduce");
+            if (!byKey.expected_behavior) missing.push("expected_behavior");
+            if (!byKey.version) missing.push("version");
+            if (!environmentPresent) missing.push("environment");
+            if (!byKey.logs) missing.push("logs");
+
+            const actionable =
+              byKey.description &&
+              byKey.steps_to_reproduce &&
+              byKey.expected_behavior &&
+              byKey.version &&
+              environmentPresent &&
+              byKey.logs;
+
+            const severity = score >= 85 ? "low" : score >= 60 ? "medium" : "high";
+
+            core.setOutput("score", String(score));
+            core.setOutput("severity", severity);
+            core.setOutput("missing", JSON.stringify(missing));
+            core.setOutput("actionable", String(actionable));
+
+      - name: Classify reporter (internal vs external)
+        id: reporter
+        uses: actions/github-script@v7
+        env:
+          ISSUE_USER: ${{ inputs.issue_user_login }}
+          INTERNAL_REPORTER_ALLOWLIST: ${{ secrets.INTERNAL_REPORTER_ALLOWLIST }}
+        with:
+          script: |
+            const login = (process.env.ISSUE_USER || '').trim().toLowerCase();
+            const raw = (process.env.INTERNAL_REPORTER_ALLOWLIST || '').trim();
+
+            let allowlist = [];
+            if (raw) {
+              try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                  allowlist = parsed.map(v => String(v).toLowerCase().trim()).filter(Boolean);
+                }
+              } catch {
+                allowlist = raw.split(',').map(v => v.toLowerCase().trim()).filter(Boolean);
+              }
+            }
+
+            const isInternal = allowlist.includes(login);
+            core.setOutput('reporter_type', isInternal ? 'internal' : 'external');
+
+      - name: Generate AI enrichment with Claude (optional)
+        id: ai
+        if: ${{ env.GNAI_API_KEY != '' }}
+        continue-on-error: true
+        env:
+          GNAI_API_KEY: ${{ secrets.GNAI_API_KEY }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+        run: |
+          python - <<'PY'
+          import json, os
+          missing = json.loads(os.environ.get('MISSING', '[]'))
+          summary = {
+            'reporter_comment': (
+              'Thanks for filing this issue. '
+              + (f"Please add the following missing information so maintainers can investigate faster: {', '.join(missing)}." if missing else 'We have enough information and are proceeding with maintainer triage.')
+            )
+          }
+          with open('ai-output.json', 'w', encoding='utf-8') as f:
+            json.dump(summary, f)
+          PY
+          echo "ai_generated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Replace triage and severity labels
+        uses: actions/github-script@v7
+        env:
+          ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+        with:
+          script: |
+            const actionable = process.env.ACTIONABLE === 'true';
+            const severity = process.env.SEVERITY;
+
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }}
+            });
+
+            const existingLabels = issue.labels.map(label => typeof label === 'string' ? label : label.name);
+            const labelsToRemove = existingLabels.filter(name =>
+              name === 'needs-info' ||
+              name === 'triage/incomplete' ||
+              name === 'triage/complete' ||
+              name.startsWith('severity/')
+            );
+
+            for (const name of labelsToRemove) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }},
+                  name
+                });
+              } catch (e) {
+                core.info(`Could not remove label ${name}: ${e.message}`);
+              }
+            }
+
+            const labelsToAdd = actionable
+              ? ['triage/complete', `severity/${severity}`]
+              : ['needs-info', 'triage/incomplete', `severity/${severity}`];
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: labelsToAdd
+            });
+
+      - name: Route assignment for actionable external reports
+        id: assignment
+        if: ${{ inputs.assign_external_actionable && steps.evaluate.outputs.actionable == 'true' && steps.reporter.outputs.reporter_type == 'external' }}
+        uses: actions/github-script@v7
+        env:
+          PRIMARY: ${{ inputs.primary_external_assignee }}
+          SECONDARY: ${{ inputs.secondary_external_assignee }}
+          THRESHOLD: ${{ inputs.external_assignment_threshold }}
+        with:
+          script: |
+            const primary = (process.env.PRIMARY || '').trim();
+            const secondary = (process.env.SECONDARY || '').trim();
+            const threshold = Number(process.env.THRESHOLD || '10');
+
+            async function openIssueCountForAssignee(username) {
+              const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open assignee:${username}`;
+              const { data } = await github.rest.search.issuesAndPullRequests({ q, per_page: 1 });
+              return data.total_count || 0;
+            }
+
+            async function tryAssign(username) {
+              if (!username) return false;
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }},
+                  assignees: [username]
+                });
+                core.setOutput('assigned_to', username);
+                return true;
+              } catch (error) {
+                core.info(`Assignment to ${username} skipped: ${error.message}`);
+                return false;
+              }
+            }
+
+            let assigned = false;
+
+            if (primary) {
+              const primaryCount = await openIssueCountForAssignee(primary);
+              if (primaryCount < threshold) {
+                assigned = await tryAssign(primary);
+              } else {
+                core.info(`Primary assignee at capacity (${primaryCount} >= ${threshold}), trying secondary.`);
+              }
+            }
+
+            if (!assigned && secondary) {
+              assigned = await tryAssign(secondary);
+            }
+
+            core.setOutput('assignment_status', assigned ? 'assigned' : 'not_assigned');
+
+      - name: Compose issue comment
+        id: comment
+        uses: actions/github-script@v7
+        env:
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+        with:
+          script: |
+            const fs = require('fs');
+            let ai = null;
+            try {
+              ai = JSON.parse(fs.readFileSync('ai-output.json', 'utf8'));
+            } catch (e) {}
+
+            const missing = JSON.parse(process.env.MISSING || '[]');
+            const actionable = process.env.ACTIONABLE === 'true';
+            const score = process.env.SCORE;
+            const severity = process.env.SEVERITY;
+
+            const body = ai?.reporter_comment || (
+              actionable
+                ? `Thanks for the report. We have enough information and are proceeding with maintainer triage.`
+                : `Thanks for the report. Please add the missing information: ${missing.join(', ')}.`
+            );
+
+            const fullComment = [
+              '## Automated issue triage',
+              '',
+              `- Completeness score: **${score}/100**`,
+              `- Suggested severity: **${severity}**`,
+              `- Actionable: **${actionable ? 'yes' : 'needs more info'}**`,
+              `- Missing fields: **${missing.length ? missing.join(', ') : 'none'}**`,
+              '',
+              body,
+              '',
+              '_This is a demo triage workflow using rules with optional AI enrichment._'
+            ].join('\n');
+
+            core.setOutput('body', fullComment);
+
+      - name: Comment on issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: `${{ steps.comment.outputs.body }}`
+            });
+
+      - name: Notify Teams (optional)
+        if: ${{ env.TEAMS_WEBHOOK_URL != '' }}
+        uses: actions/github-script@v7
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          SCORE: ${{ steps.evaluate.outputs.score }}
+          SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          MISSING: ${{ steps.evaluate.outputs.missing }}
+          ISSUE_URL: ${{ inputs.issue_html_url }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_USER: ${{ inputs.issue_user_login }}
+          REPORTER_TYPE: ${{ steps.reporter.outputs.reporter_type }}
+          ASSIGNED_TO: ${{ steps.assignment.outputs.assigned_to }}
+        with:
+          script: |
+            const missing = JSON.parse(process.env.MISSING || '[]');
+            const assignedTo = process.env.ASSIGNED_TO || 'none';
+            const card = {
+              '@type': 'MessageCard',
+              '@context': 'http://schema.org/extensions',
+              themeColor: '0076D7',
+              title: 'Issue triage result',
+              sections: [{
+                activityTitle: `Issue triaged: [${process.env.ISSUE_TITLE}](${process.env.ISSUE_URL})`,
+                facts: [
+                  { name: 'Reporter', value: process.env.ISSUE_USER },
+                  { name: 'Reporter type', value: process.env.REPORTER_TYPE || 'external' },
+                  { name: 'Assigned to', value: assignedTo },
+                  { name: 'Score', value: `${process.env.SCORE}/100` },
+                  { name: 'Severity', value: process.env.SEVERITY },
+                  { name: 'Missing fields', value: missing.length ? missing.join(', ') : 'none' }
+                ]
+              }]
+            };
+
+            await fetch(process.env.TEAMS_WEBHOOK_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(card)
+            });

@@ -1,0 +1,24 @@
+{
+  "default": {
+    "external_assignees": [
+      "sarthakdeva-intel",
+      "jthakare17"
+    ],
+    "assign_external_incomplete": true,
+    "additional_labels": [
+      "triage/external"
+    ]
+  },
+  "repositories": {
+    "shailesh837/geti": {
+      "external_assignees": [
+        "sarthakdeva-intel",
+        "jthakare17"
+      ],
+      "assign_external_incomplete": true,
+      "additional_labels": [
+        "triage/external"
+      ]
+    }
+  }
+}

@@ -21,6 +21,10 @@ on:
       issue_user_login:
         required: true
         type: string
+      internal_org:
+        required: false
+        type: string
+        default: open-edge-platform
       primary_external_assignee:
         required: false
         type: string
@@ -35,6 +39,30 @@ on:
         required: false
         type: boolean
         default: true
+      assign_external_incomplete:
+        required: false
+        type: boolean
+        default: false
+      external_assignee_pool_json:
+        required: false
+        type: string
+        default: ""
+      external_assignment_additional_labels_json:
+        required: false
+        type: string
+        default: ""
+      triage_config_path:
+        required: false
+        type: string
+        default: .github/triage-assignees.json
+      triage_config_repository:
+        required: false
+        type: string
+        default: ""
+      triage_config_ref:
+        required: false
+        type: string
+        default: main
     secrets:
       TEAMS_WEBHOOK_URL:
         required: false
@@ -211,10 +239,12 @@ jobs:
         uses: actions/github-script@v7
         env:
           ISSUE_USER: ${{ inputs.issue_user_login }}
+          INTERNAL_ORG: ${{ inputs.internal_org }}
           INTERNAL_REPORTER_ALLOWLIST: ${{ secrets.INTERNAL_REPORTER_ALLOWLIST }}
         with:
           script: |
             const login = (process.env.ISSUE_USER || '').trim().toLowerCase();
+            const org = (process.env.INTERNAL_ORG || '').trim();
             const raw = (process.env.INTERNAL_REPORTER_ALLOWLIST || '').trim();
 
             let allowlist = [];
@@ -229,8 +259,135 @@ jobs:
               }
             }
 
-            const isInternal = allowlist.includes(login);
-            core.setOutput('reporter_type', isInternal ? 'internal' : 'external');
+            if (!login) {
+              core.setOutput('reporter_type', 'unknown');
+              core.setOutput('lookup_failed', 'true');
+              core.setOutput('classification_source', 'missing-login');
+              return;
+            }
+
+            if (allowlist.includes(login)) {
+              core.setOutput('reporter_type', 'internal');
+              core.setOutput('lookup_failed', 'false');
+              core.setOutput('classification_source', 'allowlist');
+              return;
+            }
+
+            if (!org) {
+              core.setOutput('reporter_type', 'external');
+              core.setOutput('lookup_failed', 'false');
+              core.setOutput('classification_source', 'no-org-configured');
+              return;
+            }
+
+            try {
+              await github.rest.orgs.checkMembershipForUser({ org, username: login });
+              core.setOutput('reporter_type', 'internal');
+              core.setOutput('lookup_failed', 'false');
+              core.setOutput('classification_source', 'org-membership');
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('reporter_type', 'external');
+                core.setOutput('lookup_failed', 'false');
+                core.setOutput('classification_source', 'org-membership');
+                return;
+              }
+
+              core.warning(`Org membership lookup failed for ${login}: ${error.message}`);
+              core.setOutput('reporter_type', 'unknown');
+              core.setOutput('lookup_failed', 'true');
+              core.setOutput('classification_source', 'lookup-failed');
+            }
+
+      - name: Checkout caller repository for triage config
+        if: ${{ inputs.triage_config_repository == '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          path: caller-repo
+          fetch-depth: 1
+
+      - name: Checkout centralized triage config repository
+        if: ${{ inputs.triage_config_repository != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.triage_config_repository }}
+          ref: ${{ inputs.triage_config_ref }}
+          path: caller-repo
+          fetch-depth: 1
+
+      - name: Load repo triage config
+        id: triage_config
+        uses: actions/github-script@v7
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          CONFIG_PATH: ${{ inputs.triage_config_path }}
+          INPUT_ASSIGNEE_POOL_JSON: ${{ inputs.external_assignee_pool_json }}
+          INPUT_ADDITIONAL_LABELS_JSON: ${{ inputs.external_assignment_additional_labels_json }}
+          INPUT_ASSIGN_EXTERNAL_INCOMPLETE: ${{ inputs.assign_external_incomplete }}
+          PRIMARY: ${{ inputs.primary_external_assignee }}
+          SECONDARY: ${{ inputs.secondary_external_assignee }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            function parseJsonArray(raw) {
+              const value = (raw || '').trim();
+              if (!value) return [];
+
+              try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) {
+                  return parsed.map(v => String(v).trim()).filter(Boolean);
+                }
+              } catch {
+                return value.split(',').map(v => v.trim()).filter(Boolean);
+              }
+
+              return [];
+            }
+
+            const repoName = (process.env.REPOSITORY || '').trim();
+            const configPath = (process.env.CONFIG_PATH || '.github/triage-assignees.json').trim();
+
+            const explicitPool = parseJsonArray(process.env.INPUT_ASSIGNEE_POOL_JSON);
+            const explicitLabels = parseJsonArray(process.env.INPUT_ADDITIONAL_LABELS_JSON);
+            const primary = (process.env.PRIMARY || '').trim();
+            const secondary = (process.env.SECONDARY || '').trim();
+
+            let config = {};
+            const localConfigPath = path.join(process.cwd(), 'caller-repo', configPath);
+
+            if (fs.existsSync(localConfigPath)) {
+              try {
+                config = JSON.parse(fs.readFileSync(localConfigPath, 'utf8'));
+              } catch (error) {
+                core.warning(`Could not parse triage config ${configPath}: ${error.message}`);
+              }
+            } else {
+              core.info(`No triage config found at ${configPath}; using workflow inputs/fallbacks.`);
+            }
+
+            const repoConfig = (config.repositories && config.repositories[repoName]) || config.default || {};
+
+            const configPool = Array.isArray(repoConfig.external_assignees)
+              ? repoConfig.external_assignees.map(v => String(v).trim()).filter(Boolean)
+              : [];
+            const configLabels = Array.isArray(repoConfig.additional_labels)
+              ? repoConfig.additional_labels.map(v => String(v).trim()).filter(Boolean)
+              : [];
+
+            const fallbackPool = [primary, secondary].filter(Boolean);
+            const assigneePool = explicitPool.length ? explicitPool : (configPool.length ? configPool : fallbackPool);
+            const additionalLabels = explicitLabels.length ? explicitLabels : configLabels;
+
+            const inputAssignIncomplete = String(process.env.INPUT_ASSIGN_EXTERNAL_INCOMPLETE || 'false') === 'true';
+            const assignIncomplete = repoConfig.assign_external_incomplete === true || inputAssignIncomplete;
+
+            core.setOutput('assignee_pool_json', JSON.stringify(Array.from(new Set(assigneePool))));
+            core.setOutput('additional_labels_json', JSON.stringify(Array.from(new Set(additionalLabels))));
+            core.setOutput('assign_external_incomplete', String(assignIncomplete));
 
       - name: Generate AI enrichment with Claude (optional)
         id: ai
@@ -266,10 +423,16 @@ jobs:
         env:
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
           SEVERITY: ${{ steps.evaluate.outputs.severity }}
+          LOOKUP_FAILED: ${{ steps.reporter.outputs.lookup_failed }}
+          REPORTER_TYPE: ${{ steps.reporter.outputs.reporter_type }}
+          ADDITIONAL_LABELS: ${{ steps.triage_config.outputs.additional_labels_json }}
         with:
           script: |
             const actionable = process.env.ACTIONABLE === 'true';
             const severity = process.env.SEVERITY;
+            const lookupFailed = process.env.LOOKUP_FAILED === 'true';
+            const reporterType = process.env.REPORTER_TYPE || 'external';
+            const additionalLabels = JSON.parse(process.env.ADDITIONAL_LABELS || '[]');
 
             const { data: issue } = await github.rest.issues.get({
               owner: context.repo.owner,
@@ -282,6 +445,7 @@ jobs:
               name === 'needs-info' ||
               name === 'triage/incomplete' ||
               name === 'triage/complete' ||
+              name === 'triage/membership-check-failed' ||
               name.startsWith('severity/')
             );
 
@@ -302,26 +466,78 @@ jobs:
               ? ['triage/complete', `severity/${severity}`]
               : ['needs-info', 'triage/incomplete', `severity/${severity}`];
 
+            if (lookupFailed) {
+              labelsToAdd.push('triage/membership-check-failed');
+            }
+
+            if (reporterType === 'external' && Array.isArray(additionalLabels)) {
+              labelsToAdd.push(...additionalLabels);
+            }
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: ${{ inputs.issue_number }},
-              labels: labelsToAdd
+              labels: Array.from(new Set(labelsToAdd))
             });
+
+      - name: Evaluate assignment eligibility
+        id: assignment_policy
+        uses: actions/github-script@v7
+        env:
+          ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
+          REPORTER_TYPE: ${{ steps.reporter.outputs.reporter_type }}
+          LOOKUP_FAILED: ${{ steps.reporter.outputs.lookup_failed }}
+          ASSIGN_ACTIONABLE: ${{ inputs.assign_external_actionable }}
+          ASSIGN_INCOMPLETE: ${{ steps.triage_config.outputs.assign_external_incomplete }}
+        with:
+          script: |
+            const actionable = process.env.ACTIONABLE === 'true';
+            const reporterType = process.env.REPORTER_TYPE;
+            const lookupFailed = process.env.LOOKUP_FAILED === 'true';
+            const assignActionableEnabled = String(process.env.ASSIGN_ACTIONABLE || 'true') === 'true';
+            const assignIncomplete = String(process.env.ASSIGN_INCOMPLETE || 'false') === 'true';
+
+            const shouldAssign =
+              assignActionableEnabled &&
+              reporterType === 'external' &&
+              !lookupFailed &&
+              (actionable || assignIncomplete);
+
+            core.setOutput('should_assign', String(shouldAssign));
 
       - name: Route assignment for actionable external reports
         id: assignment
-        if: ${{ inputs.assign_external_actionable && steps.evaluate.outputs.actionable == 'true' && steps.reporter.outputs.reporter_type == 'external' }}
+        if: ${{ steps.assignment_policy.outputs.should_assign == 'true' }}
         uses: actions/github-script@v7
         env:
-          PRIMARY: ${{ inputs.primary_external_assignee }}
-          SECONDARY: ${{ inputs.secondary_external_assignee }}
+          ASSIGNEE_POOL: ${{ steps.triage_config.outputs.assignee_pool_json }}
           THRESHOLD: ${{ inputs.external_assignment_threshold }}
         with:
           script: |
-            const primary = (process.env.PRIMARY || '').trim();
-            const secondary = (process.env.SECONDARY || '').trim();
+            const assigneePoolRaw = (process.env.ASSIGNEE_POOL || '').trim();
             const threshold = Number(process.env.THRESHOLD || '10');
+
+            function parsePool(raw) {
+              if (!raw) return [];
+              try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                  return parsed.map(v => String(v).trim()).filter(Boolean);
+                }
+              } catch {
+                return raw.split(',').map(v => v.trim()).filter(Boolean);
+              }
+              return [];
+            }
+
+            const assigneePool = Array.from(new Set(parsePool(assigneePoolRaw)));
+            if (!assigneePool.length) {
+              core.info('No assignee pool configured for this repository.');
+              core.setOutput('assignment_status', 'not_assigned');
+              core.setOutput('assignment_reason', 'empty-assignee-pool');
+              return;
+            }
 
             async function openIssueCountForAssignee(username) {
               const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open assignee:${username}`;
@@ -346,22 +562,32 @@ jobs:
               }
             }
 
-            let assigned = false;
+            const withCounts = [];
+            for (const username of assigneePool) {
+              withCounts.push({ username, count: await openIssueCountForAssignee(username) });
+            }
 
-            if (primary) {
-              const primaryCount = await openIssueCountForAssignee(primary);
-              if (primaryCount < threshold) {
-                assigned = await tryAssign(primary);
-              } else {
-                core.info(`Primary assignee at capacity (${primaryCount} >= ${threshold}), trying secondary.`);
+            const eligible = withCounts
+              .filter(item => Number.isFinite(threshold) ? item.count < threshold : true)
+              .sort((a, b) => a.count - b.count);
+
+            if (!eligible.length) {
+              core.info(`No eligible assignees under threshold ${threshold}.`);
+              core.setOutput('assignment_status', 'not_assigned');
+              core.setOutput('assignment_reason', 'at-capacity');
+              return;
+            }
+
+            let assigned = false;
+            for (const item of eligible) {
+              assigned = await tryAssign(item.username);
+              if (assigned) {
+                break;
               }
             }
 
-            if (!assigned && secondary) {
-              assigned = await tryAssign(secondary);
-            }
-
             core.setOutput('assignment_status', assigned ? 'assigned' : 'not_assigned');
+            core.setOutput('assignment_reason', assigned ? 'assigned' : 'assignment-api-failed');
 
       - name: Resolve assignee email (private)
         id: assignee_email
@@ -443,6 +669,10 @@ jobs:
           SEVERITY: ${{ steps.evaluate.outputs.severity }}
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
           MISSING: ${{ steps.evaluate.outputs.missing }}
+          REPORTER_TYPE: ${{ steps.reporter.outputs.reporter_type }}
+          LOOKUP_FAILED: ${{ steps.reporter.outputs.lookup_failed }}
+          ASSIGNMENT_STATUS: ${{ steps.assignment.outputs.assignment_status }}
+          ASSIGNED_TO: ${{ steps.assignment.outputs.assigned_to }}
         with:
           script: |
             const fs = require('fs');
@@ -455,6 +685,10 @@ jobs:
             const actionable = process.env.ACTIONABLE === 'true';
             const score = process.env.SCORE;
             const severity = process.env.SEVERITY;
+            const reporterType = process.env.REPORTER_TYPE || 'unknown';
+            const lookupFailed = process.env.LOOKUP_FAILED === 'true';
+            const assignmentStatus = process.env.ASSIGNMENT_STATUS || 'not_evaluated';
+            const assignedTo = process.env.ASSIGNED_TO || 'none';
 
             const body = ai?.reporter_comment || (
               actionable
@@ -465,9 +699,11 @@ jobs:
             const fullComment = [
               '## Automated issue triage',
               '',
+              `- Reporter type: **${reporterType}**${lookupFailed ? ' (membership lookup failed)' : ''}`,
               `- Completeness score: **${score}/100**`,
               `- Suggested severity: **${severity}**`,
               `- Actionable: **${actionable ? 'yes' : 'needs more info'}**`,
+              `- Assignment: **${assignmentStatus}** (assignee: **${assignedTo}**)`,
               `- Missing fields: **${missing.length ? missing.join(', ') : 'none'}**`,
               '',
               body,

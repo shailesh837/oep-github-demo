@@ -251,13 +251,13 @@ jobs:
               return;
             }
 
-            // Demo override: allow this internal user to exercise external triage flows.
-            if (login === 'sarthakdeva-intel') {
-              core.setOutput('reporter_type', 'external');
-              core.setOutput('lookup_failed', 'false');
-              core.setOutput('classification_source', 'demo-override');
-              return;
-            }
+            // Demo override disabled after external-path validation.
+            // if (login === 'sarthakdeva-intel') {
+            //   core.setOutput('reporter_type', 'external');
+            //   core.setOutput('lookup_failed', 'false');
+            //   core.setOutput('classification_source', 'demo-override');
+            //   return;
+            // }
 
             if (allowlist.includes(login)) {
               core.setOutput('reporter_type', 'internal');

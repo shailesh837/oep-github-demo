@@ -21,21 +21,7 @@ on:
       issue_user_login:
         required: true
         type: string
-      internal_org:
-        required: false
-        type: string
-        default: open-edge-platform
-      primary_external_assignee:
-        required: false
-        type: string
-      secondary_external_assignee:
-        required: false
-        type: string
-      external_assignment_threshold:
-        required: false
-        type: number
-        default: 10
-      assign_external_actionable:
+      auto_assignment_enabled:
         required: false
         type: boolean
         default: true
@@ -239,12 +225,11 @@ jobs:
         uses: actions/github-script@v7
         env:
           ISSUE_USER: ${{ inputs.issue_user_login }}
-          INTERNAL_ORG: ${{ inputs.internal_org }}
           INTERNAL_REPORTER_ALLOWLIST: ${{ secrets.INTERNAL_REPORTER_ALLOWLIST }}
         with:
           script: |
             const login = (process.env.ISSUE_USER || '').trim().toLowerCase();
-            const org = (process.env.INTERNAL_ORG || '').trim();
+            const org = 'open-edge-platform';
             const raw = (process.env.INTERNAL_REPORTER_ALLOWLIST || '').trim();
 
             let allowlist = [];
@@ -270,13 +255,6 @@ jobs:
               core.setOutput('reporter_type', 'internal');
               core.setOutput('lookup_failed', 'false');
               core.setOutput('classification_source', 'allowlist');
-              return;
-            }
-
-            if (!org) {
-              core.setOutput('reporter_type', 'external');
-              core.setOutput('lookup_failed', 'false');
-              core.setOutput('classification_source', 'no-org-configured');
               return;
             }
 
@@ -325,8 +303,6 @@ jobs:
           INPUT_ASSIGNEE_POOL_JSON: ${{ inputs.external_assignee_pool_json }}
           INPUT_ADDITIONAL_LABELS_JSON: ${{ inputs.external_assignment_additional_labels_json }}
           INPUT_ASSIGN_EXTERNAL_INCOMPLETE: ${{ inputs.assign_external_incomplete }}
-          PRIMARY: ${{ inputs.primary_external_assignee }}
-          SECONDARY: ${{ inputs.secondary_external_assignee }}
         with:
           script: |
             const fs = require('fs');
@@ -353,8 +329,6 @@ jobs:
 
             const explicitPool = parseJsonArray(process.env.INPUT_ASSIGNEE_POOL_JSON);
             const explicitLabels = parseJsonArray(process.env.INPUT_ADDITIONAL_LABELS_JSON);
-            const primary = (process.env.PRIMARY || '').trim();
-            const secondary = (process.env.SECONDARY || '').trim();
 
             let config = {};
             const localConfigPath = path.join(process.cwd(), 'caller-repo', configPath);
@@ -378,8 +352,7 @@ jobs:
               ? repoConfig.additional_labels.map(v => String(v).trim()).filter(Boolean)
               : [];
 
-            const fallbackPool = [primary, secondary].filter(Boolean);
-            const assigneePool = explicitPool.length ? explicitPool : (configPool.length ? configPool : fallbackPool);
+            const assigneePool = explicitPool.length ? explicitPool : configPool;
             const additionalLabels = explicitLabels.length ? explicitLabels : configLabels;
 
             const inputAssignIncomplete = String(process.env.INPUT_ASSIGN_EXTERNAL_INCOMPLETE || 'false') === 'true';
@@ -488,18 +461,18 @@ jobs:
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
           REPORTER_TYPE: ${{ steps.reporter.outputs.reporter_type }}
           LOOKUP_FAILED: ${{ steps.reporter.outputs.lookup_failed }}
-          ASSIGN_ACTIONABLE: ${{ inputs.assign_external_actionable }}
+          AUTO_ASSIGNMENT_ENABLED: ${{ inputs.auto_assignment_enabled }}
           ASSIGN_INCOMPLETE: ${{ steps.triage_config.outputs.assign_external_incomplete }}
         with:
           script: |
             const actionable = process.env.ACTIONABLE === 'true';
             const reporterType = process.env.REPORTER_TYPE;
             const lookupFailed = process.env.LOOKUP_FAILED === 'true';
-            const assignActionableEnabled = String(process.env.ASSIGN_ACTIONABLE || 'true') === 'true';
+            const autoAssignmentEnabled = String(process.env.AUTO_ASSIGNMENT_ENABLED || 'true') === 'true';
             const assignIncomplete = String(process.env.ASSIGN_INCOMPLETE || 'false') === 'true';
 
             const shouldAssign =
-              assignActionableEnabled &&
+              autoAssignmentEnabled &&
               reporterType === 'external' &&
               !lookupFailed &&
               (actionable || assignIncomplete);
@@ -512,11 +485,9 @@ jobs:
         uses: actions/github-script@v7
         env:
           ASSIGNEE_POOL: ${{ steps.triage_config.outputs.assignee_pool_json }}
-          THRESHOLD: ${{ inputs.external_assignment_threshold }}
         with:
           script: |
             const assigneePoolRaw = (process.env.ASSIGNEE_POOL || '').trim();
-            const threshold = Number(process.env.THRESHOLD || '10');
 
             function parsePool(raw) {
               if (!raw) return [];
@@ -567,16 +538,7 @@ jobs:
               withCounts.push({ username, count: await openIssueCountForAssignee(username) });
             }
 
-            const eligible = withCounts
-              .filter(item => Number.isFinite(threshold) ? item.count < threshold : true)
-              .sort((a, b) => a.count - b.count);
-
-            if (!eligible.length) {
-              core.info(`No eligible assignees under threshold ${threshold}.`);
-              core.setOutput('assignment_status', 'not_assigned');
-              core.setOutput('assignment_reason', 'at-capacity');
-              return;
-            }
+            const eligible = withCounts.sort((a, b) => a.count - b.count);
 
             let assigned = false;
             for (const item of eligible) {

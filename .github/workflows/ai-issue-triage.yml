@@ -388,7 +388,7 @@ jobs:
             'reporter_comment': (
               'Thanks for filing this issue. '
               + (
-                  f"Please add the following missing information so maintainers can investigate faster: {', '.join(missing)}."
+                  f"Please edit the original issue description (instead of replying in comments) and add the following missing information so maintainers can investigate faster: {', '.join(missing)}. You may also upload any relevant logs or screenshots. Once the issue description has been updated, the GitHub triage workflow will automatically run again."
                   if missing else
                   'We have enough information and are proceeding with maintainer triage.'
                 )

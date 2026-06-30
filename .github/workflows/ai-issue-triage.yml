@@ -544,6 +544,24 @@ jobs:
               core.setOutput('assignment_reason', 'empty-assignee-pool');
               return;
             }
+            
+            const { data: currentIssue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }}
+            });
+            
+            const existingAssignees = currentIssue.assignees || [];
+
+            if (existingAssignees.length > 0) {
+              const existingNames = existingAssignees.map(user => user.login).join(', ');
+              
+              core.info(`Issue already has assignee(s): ${existingNames}. Skipping additional assignment.`);
+              core.setOutput('assignment_status', 'already_assigned');
+              core.setOutput('assignment_reason', 'existing-assignee');
+              core.setOutput('assigned_to', existingAssignees[0].login);
+              return;
+            }
 
             async function openIssueCountForAssignee(username) {
               const q = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open assignee:${username}`;
@@ -703,7 +721,6 @@ jobs:
               '',
               `- Reporter type: **${reporterType}**${lookupFailed ? ' (membership lookup failed)' : ''}`,
               `- Completeness score: **${score}/100**`,
-              `- Suggested severity: **${severity}**`,
               `- Actionable: **${actionable ? 'yes' : 'needs more info'}**`,
               `- Assignment: **${assignmentStatus}** (assignee: **${assignedTo}**)`,
               `- Missing fields: **${missing.length ? missing.join(', ') : 'none'}**`,

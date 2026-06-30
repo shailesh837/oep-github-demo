@@ -71,7 +71,30 @@ jobs:
   triage:
     runs-on: ubuntu-latest
     steps:
+      - name: Check if issue is already triage complete
+        id: triage_state
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }}
+            });
+
+            const labels = issue.labels.map(label =>
+              typeof label === 'string' ? label : label.name
+            );
+
+            const alreadyComplete = labels.includes('triage/complete');
+
+            core.setOutput('already_complete', String(alreadyComplete));
+
+            if (alreadyComplete) {
+              core.info('Issue already has triage/complete. Skipping label, assignment, comment, email, and Teams updates.');
+            }
       - name: Evaluate issue completeness
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         id: evaluate
         uses: actions/github-script@v7
         env:
@@ -219,8 +242,9 @@ jobs:
             core.setOutput("severity", severity);
             core.setOutput("missing", JSON.stringify(missing));
             core.setOutput("actionable", String(actionable));
-
+  
       - name: Classify reporter (internal vs external)
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         id: reporter
         uses: actions/github-script@v7
         env:
@@ -286,7 +310,7 @@ jobs:
             }
 
       - name: Checkout caller repository for triage config
-        if: ${{ inputs.triage_config_repository == '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' && inputs.triage_config_repository == '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
@@ -294,7 +318,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout centralized triage config repository
-        if: ${{ inputs.triage_config_repository != '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' && inputs.triage_config_repository != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.triage_config_repository }}
@@ -303,6 +327,7 @@ jobs:
           fetch-depth: 1
 
       - name: Load repo triage config
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         id: triage_config
         uses: actions/github-script@v7
         env:
@@ -372,7 +397,7 @@ jobs:
 
       - name: Generate AI enrichment with Claude (optional)
         id: ai
-        if: ${{ env.GNAI_API_KEY != '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         continue-on-error: true
         env:
           GNAI_API_KEY: ${{ secrets.GNAI_API_KEY }}
@@ -400,6 +425,7 @@ jobs:
           echo "ai_generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Replace triage and severity labels
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         uses: actions/github-script@v7
         env:
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
@@ -464,6 +490,7 @@ jobs:
 
       - name: Evaluate assignment eligibility
         id: assignment_policy
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         uses: actions/github-script@v7
         env:
           ACTIONABLE: ${{ steps.evaluate.outputs.actionable }}
@@ -489,7 +516,7 @@ jobs:
 
       - name: Route assignment for actionable external reports
         id: assignment
-        if: ${{ steps.assignment_policy.outputs.should_assign == 'true' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' && steps.assignment_policy.outputs.should_assign == 'true' }}
         uses: actions/github-script@v7
         env:
           ASSIGNEE_POOL: ${{ steps.triage_config.outputs.assignee_pool_json }}
@@ -561,7 +588,7 @@ jobs:
 
       - name: Resolve assignee email (private)
         id: assignee_email
-        if: ${{ steps.assignment.outputs.assignment_status == 'assigned' && env.ASSIGNEE_EMAIL_MAP != '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' && steps.assignment.outputs.assignment_status == 'assigned' }}
         uses: actions/github-script@v7
         env:
           ASSIGNED_TO: ${{ steps.assignment.outputs.assigned_to }}
@@ -590,7 +617,7 @@ jobs:
             }
 
       - name: Send email notification (private)
-        if: ${{ steps.assignee_email.outputs.recipient_found == 'true' && env.MAIL_API_URL != '' && env.MAIL_API_TOKEN != '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' && steps.assignee_email.outputs.recipient_found == 'true' }}
         env:
           MAIL_API_URL: ${{ secrets.MAIL_API_URL }}
           MAIL_API_TOKEN: ${{ secrets.MAIL_API_TOKEN }}
@@ -603,6 +630,10 @@ jobs:
         run: |
           python - <<'PY'
           import json, os, urllib.request
+          
+          if not os.environ.get("MAIL_API_URL") or not os.environ.get("MAIL_API_TOKEN"):
+              print("MAIL_API_URL or MAIL_API_TOKEN is not configured. Skipping email notification.")
+              raise SystemExit(0)
 
           payload = {
             "to": os.environ["RECIPIENT_EMAIL"],
@@ -633,6 +664,7 @@ jobs:
 
       - name: Compose issue comment
         id: comment
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         uses: actions/github-script@v7
         env:
           SCORE: ${{ steps.evaluate.outputs.score }}
@@ -684,6 +716,7 @@ jobs:
             core.setOutput('body', fullComment);
 
       - name: Comment on issue
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -695,7 +728,7 @@ jobs:
             });
 
       - name: Notify Teams (optional)
-        if: ${{ env.TEAMS_WEBHOOK_URL != '' }}
+        if: ${{ steps.triage_state.outputs.already_complete != 'true' }}
         uses: actions/github-script@v7
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -728,6 +761,11 @@ jobs:
                 ]
               }]
             };
+
+            if (!process.env.TEAMS_WEBHOOK_URL) {
+              core.info('TEAMS_WEBHOOK_URL is not configured. Skipping Teams notification.');
+              return;
+            }
 
             await fetch(process.env.TEAMS_WEBHOOK_URL, {
               method: 'POST',
